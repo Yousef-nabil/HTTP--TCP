@@ -1,4 +1,4 @@
-from Udp import ReliableUDP
+from ReliableUDP import ReliableUDP
 
 class HttpManual:
     def __init__(self, ip="127.0.0.1", port=8080):
