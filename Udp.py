@@ -1,173 +1,285 @@
 import socket
-import struct
-import threading
-
+import json
+import time
+import random
 
 class ReliableUDP:
-    """
-    Temporary simulation of ReliableUDP using normal TCP sockets.
-    Keeps the same interface so later you can replace internals
-    with your teammate's real UDP reliability implementation.
-    """
-
-    SYN = 0x01
-    ACK = 0x02
-    FIN = 0x04
-
-    HEADER_FORMAT = "!IIHH"   # seq, ack, flags, length
-    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-
     def __init__(self, ip, port, is_server=False):
-        self.ip = ip
-        self.port = port
-        self.is_server = is_server
+        self.addr = (ip, port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self.sock.settimeout(2)
 
         self.seq = 0
-        self.ack = 0
+        self.expected_seq = 0
 
-        self.server_socket = None
-        self.sock = None
-        self.conn = None
+        self.is_server = is_server
 
         if is_server:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((ip, port))
-            self.server_socket.listen(1)
-        else:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.bind(self.addr)
 
-    # --------------------------------------------------
-    # Packet Helpers
-    # --------------------------------------------------
-
+    # ---------------- Packet Layer ----------------
     def create_packet(self, seq, ack, flags, data):
-        if isinstance(data, str):
-            data = data.encode()
+        packet = {
+            "seq": seq,
+            "ack": ack,
+            "flags": flags,
+            "data": data,
+        }
 
-        header = struct.pack(
-            self.HEADER_FORMAT,
-            seq,
-            ack,
-            flags,
-            len(data)
-        )
-
-        checksum = self.compute_checksum(header + data)
-
-        # append checksum (2 bytes)
-        return header + struct.pack("!H", checksum) + data
+        checksum = self.compute_checksum(packet)
+        packet["checksum"] = checksum
+        if random.random() < 0.01:
+          print("⚠️ Packet CORRUPTED (simulated)")
+          packet["checksum"] = checksum + 1
+        return json.dumps(packet).encode()
 
     def compute_checksum(self, packet):
-        return sum(packet) % 65535
+     temp = dict(packet)
+     temp["checksum"] = 0
+     data = json.dumps(temp, sort_keys=True).encode()
+     return sum(data) % 256
 
     def verify_checksum(self, packet):
-        if len(packet) < self.HEADER_SIZE + 2:
-            return False
+     received_checksum = packet["checksum"]
 
-        header = packet[:self.HEADER_SIZE]
-        recv_checksum = struct.unpack("!H", packet[self.HEADER_SIZE:self.HEADER_SIZE + 2])[0]
-        body = header + packet[self.HEADER_SIZE + 2:]
-        calc = self.compute_checksum(body)
+     temp = dict(packet)
+     temp["checksum"] = 0
 
-        return recv_checksum == calc
+     computed = sum(json.dumps(temp, sort_keys=True).encode()) % 256
+     return received_checksum == computed
+    # ---------------- UDP I/O ----------------
+    def send_packet(self, packet, addr=None):
+      if random.random() < 0.02:
+        print("⚠️ Packet LOST (simulated)")
+        return
 
-    # --------------------------------------------------
-    # Low-level socket wrappers
-    # --------------------------------------------------
+      if addr is None:
+        addr = self.addr
 
-    def send_packet(self, packet):
-        conn = self.conn if self.is_server else self.sock
-        conn.sendall(packet)
-
+      self.sock.sendto(packet, addr)
     def receive_packet(self):
-        conn = self.conn if self.is_server else self.sock
+        try:
+            data, addr = self.sock.recvfrom(4096)
+        except socket.timeout:
+             return None, None
 
-        # read header + checksum (HEADER_SIZE + 2 bytes)
-        header = b""
-        while len(header) < self.HEADER_SIZE + 2:
-            chunk = conn.recv(self.HEADER_SIZE + 2 - len(header))
-            if not chunk:
-                return None
-            header += chunk
-
-        seq, ack, flags, length = struct.unpack(
-            self.HEADER_FORMAT,
-            header[:self.HEADER_SIZE]
-        )
-
-        data = b""
-        while len(data) < length:
-            chunk = conn.recv(length - len(data))
-            if not chunk:
-                break
-            data += chunk
-
-        packet = header + data
+        try:
+             packet = json.loads(data.decode())
+        except:
+            return None, addr
 
         if not self.verify_checksum(packet):
-            raise Exception("Checksum failed")
+          print("❌ Corrupted packet dropped")
+          return None, addr
 
-        return packet
+        return packet, addr
 
-    # --------------------------------------------------
-    # Public API
-    # --------------------------------------------------
-
-    def handshake(self):
-        """
-        Simulated 3-way handshake over TCP.
-        """
-
-        if self.is_server:
-            self.conn, addr = self.server_socket.accept()
-
-            syn = self.receive_packet()
-
-            syn_ack = self.create_packet(1, 1, self.SYN | self.ACK, b"")
-            self.send_packet(syn_ack)
-
-            final_ack = self.receive_packet()
-
-        else:
-            self.sock.connect((self.ip, self.port))
-
-            syn = self.create_packet(0, 0, self.SYN, b"")
-            self.send_packet(syn)
-
-            syn_ack = self.receive_packet()
-
-            ack = self.create_packet(1, 1, self.ACK, b"")
-            self.send_packet(ack)
-
+    # ---------------- Reliability Layer ----------------
     def send(self, data):
-        packet = self.create_packet(self.seq, self.ack, self.ACK, data)
-        self.send_packet(packet)
-        self.seq += 1
+        while True:
+            old_seq = self.seq
+
+            packet = self.create_packet(
+            old_seq,
+            0,
+            {"ACK": 0, "SYN": 0, "FIN": 0},
+            data
+        )
+
+            print(f"➡️ Sending seq={old_seq}")
+            self.send_packet(packet)
+
+            ack_packet, _ = self.receive_packet()
+
+            if ack_packet is None:
+              print("⏱ Timeout → Retransmitting...")
+              continue
+
+            if ack_packet["flags"].get("ACK") == 1 and ack_packet["ack"] == old_seq:
+             print(f"✅ ACK received for seq={old_seq}")
+             self.seq = 1 - self.seq
+             break
 
     def receive(self):
-        packet = self.receive_packet()
-        if packet is None:
-            return None
-
-        header = packet[:self.HEADER_SIZE]
-        seq, ack, flags, length = struct.unpack(self.HEADER_FORMAT, header)
-
-        data = packet[self.HEADER_SIZE + 2:]
-        self.ack = seq + 1
-
-        return data
-
-    def close(self):
-        fin = self.create_packet(self.seq, self.ack, self.FIN, b"")
+     while True:
         try:
-            self.send_packet(fin)
-        except:
-            pass
+            packet, addr = self.receive_packet()
 
-        if self.conn:
-            self.conn.close()
-        if self.sock:
-            self.sock.close()
-        if self.server_socket:
-            self.server_socket.close()
+            if packet is None:
+                continue
+
+            # ---------------- FIN Handling ----------------
+            if packet["flags"].get("FIN") == 1:
+                print("📥 FIN received")
+
+                # 1. Send ACK for FIN
+                ack = self.create_packet(
+                    0, 0,
+                    {"ACK": 1, "SYN": 0, "FIN": 0},
+                    ""
+                )
+                self.sock.sendto(ack, addr)
+                print("✅ Sent ACK for FIN")
+
+                # 2. Send server FIN
+                fin = self.create_packet(
+                    0, 0,
+                    {"FIN": 1, "ACK": 0, "SYN": 0},
+                    ""
+                )
+                self.sock.sendto(fin, addr)
+                print("🔴 Sent FIN (server side)")
+
+                # 3. Wait for final ACK
+                while True:
+                    try:
+                        final_ack, _ = self.receive_packet()
+
+                        if final_ack and final_ack["flags"].get("ACK") == 1:
+                            print("🔒 Connection fully closed")
+                            return None
+
+                    except socket.timeout:
+                        print("⏱ Resending FIN (server)")
+                        self.sock.sendto(fin, addr)
+
+            # ---------------- Normal Data ----------------
+            seq = packet["seq"]
+
+            if seq == self.expected_seq:
+                print(f"📥 Received seq={seq}")
+                self.expected_seq = 1-self.expected_seq
+
+                ack = self.create_packet(
+                    0,
+                    seq,
+                    {"ACK": 1, "SYN": 0, "FIN": 0},
+                    ""
+                )
+                self.sock.sendto(ack, addr)
+
+                return packet["data"].encode()
+
+            else:
+                print("⚠️ Duplicate packet → Resend ACK")
+
+                ack = self.create_packet(
+                    0,
+                    1 - self.expected_seq,
+                    {"ACK": 1, "SYN": 0, "FIN": 0},
+                    ""
+                )
+                self.sock.sendto(ack, addr)
+
+        except socket.timeout:
+             return None
+
+    # ---------------- Handshake ----------------
+    def handshake(self):
+        if not self.is_server:
+            # CLIENT
+            print("🔵 Sending SYN")
+            syn = self.create_packet(
+                0, 0,
+                {"SYN": 1, "ACK": 0, "FIN": 0},
+                ""
+            )
+            
+
+            while True:
+                self.send_packet(syn)
+                
+                packet, _ = self.receive_packet()
+                if packet is None:
+                 print("⏱ Timeout → Resending SYN")
+                 continue
+                if packet and packet["flags"]["SYN"] == 1 and packet["flags"]["ACK"] == 1:
+                    print("🟢 Received SYN-ACK")
+
+                    ack = self.create_packet(
+                         0, 0,
+                         {"ACK": 1, "SYN": 0, "FIN": 0},
+                         ""
+                        )
+                    self.send_packet(ack)
+                    print("✅ Connection Established")
+                    break
+
+                
+
+        else:
+            # SERVER
+            print("🟡 Waiting for SYN...")
+
+            while True:
+                
+                packet, addr = self.receive_packet()
+                if packet is None:
+                    print("⏱ Waiting for SYN...")
+                    continue
+
+                if packet and packet["flags"]["SYN"] == 1:
+                    print("🔵 Received SYN")
+
+                    self.addr = addr
+
+                    syn_ack = self.create_packet(
+                        0, 0,
+                        {"SYN": 1, "ACK": 1, "FIN": 0},
+                        ""
+                    )
+                    self.sock.sendto(syn_ack, addr)
+
+                    while True:
+                       
+                        packet, _ = self.receive_packet()
+                        if packet and packet["flags"]["ACK"] == 1:
+                            print("✅ Connection Established")
+                            return
+                        if packet is None:
+                            print("⏱ Timeout → Resending SYN")
+                            self.sock.sendto(syn_ack, addr)
+                            continue
+
+    # ---------------- Close ----------------
+    def close(self):
+        fin = self.create_packet(
+        0, 0,
+        {"FIN": 1, "ACK": 0, "SYN": 0},
+        ""
+    )
+
+        self.send_packet(fin)
+        print("🔴 Sent FIN")
+
+        got_ack = False
+        got_fin = False  # ✔ ADD THIS FLAG
+
+        while not (got_ack and got_fin):
+            try:
+                packet, _ = self.receive_packet()
+                if not packet:
+                     continue
+                if packet["flags"].get("ACK") == 1:
+                    print("✅ FIN acknowledged")
+                    got_ack = True
+
+                elif packet["flags"].get("FIN") == 1:
+                    sender = "client" if self.is_server else "server"
+                    print(f"📥 Received FIN from {sender}")     
+
+                # send final ACK
+                    ack = self.create_packet(
+                         0, 0,
+                         {"ACK": 1, "SYN": 0, "FIN": 0},
+                         ""
+                      )
+                    self.sock.sendto(ack, self.addr)
+                    got_fin = True
+
+            except socket.timeout:
+             print("⏱ Resending FIN")
+             self.send_packet(fin)
+
+        self.sock.close() 
