@@ -1,4 +1,4 @@
-from Udp import ReliableUDP
+from ReliableUDP import ReliableUDP
 from urllib.parse import urlparse, parse_qs
 
 
@@ -15,17 +15,26 @@ def parse_http_request(raw_request):
     method = parts[0]
     path = parts[1]
     
-    # Parse headers
+    # Parse headers (case-insensitive)
     headers = {}
     i = 1
     while i < len(lines) and lines[i] != '':
         if ': ' in lines[i]:
             key, value = lines[i].split(': ', 1)
-            headers[key] = value
+            headers[key.lower()] = value
         i += 1
     
     # Body is everything after the empty line
     body = '\r\n'.join(lines[i+1:]) if i + 1 < len(lines) else ''
+    
+    # Verify Content-Length if present
+    if 'content-length' in headers:
+        try:
+            expected_len = int(headers['content-length'])
+            if len(body) != expected_len:
+                return None
+        except ValueError:
+            return None
     
     # Parse query parameters from path for GET
     params = {}
@@ -39,8 +48,10 @@ def parse_http_request(raw_request):
     # Parse body data for POST
     post_data = {}
     if method == 'POST' and body:
-        post_data = parse_qs(body)
-        post_data = {k: v[0] if len(v) == 1 else v for k, v in post_data.items()}
+        content_type = headers.get('content-type', '')
+        if 'application/x-www-form-urlencoded' in content_type:
+            post_data = parse_qs(body)
+            post_data = {k: v[0] if len(v) == 1 else v for k, v in post_data.items()}
     
     return {
         'method': method,
@@ -76,46 +87,67 @@ if __name__ == "__main__":
         
         parsed = parse_http_request(raw_request)
         
-        if parsed:
+        if not parsed:
+            response_body = "Bad Request"
+            status_code = "400 Bad Request"
+        else:
             method = parsed['method']
             path = parsed['path']
             headers = parsed['headers']
             params = parsed['params']
             post_data = parsed['post_data']
             
-        print(f"\nMethod: {method}")
-        print(f"Path: {path}")
-        print(f"\nRequest Headers:")
-        for key, value in headers.items():
-            print(f"  {key}: {value}")
-        
-        if method == 'GET' and params:
-            print(f"\nQuery Parameters:")
-            for key, value in params.items():
+            print(f"\nMethod: {method}")
+            print(f"Path: {path}")
+            print(f"\nRequest Headers:")
+            for key, value in headers.items():
                 print(f"  {key}: {value}")
-        
-        if method == 'POST' and post_data:
-            print(f"\nPOST Data:")
-            for key, value in post_data.items():
-                print(f"  {key}: {value}")
-        
-        print()
-        
-        # Build response body
-        response_body = ""
-        if method == 'GET':
-            # Replay with path name and query parameters
-            if params:
-                param_str = '&'.join(f"{k}={v}" for k, v in params.items())
-                response_body = f"{path}?{param_str}"
+            
+            if method == 'GET' and params:
+                print(f"\nQuery Parameters:")
+                for key, value in params.items():
+                    print(f"  {key}: {value}")
+            
+            if method == 'POST' and post_data:
+                print(f"\nPOST Data:")
+                for key, value in post_data.items():
+                    print(f"  {key}: {value}")
+            
+            print()
+            
+            # Build response based on path and method
+            response_body = ""
+            status_code = "200 OK"
+            
+            if method == 'GET' and path == '/users':
+                if 'id' in params:
+                    try:
+                        user_id = int(params['id'])
+                        if 10 <= user_id <= 100:
+                            response_body = f"id={user_id}"
+                        else:
+                            status_code = "400 Bad Request"
+                            response_body = "Bad Request"
+                    except (ValueError, TypeError):
+                        status_code = "400 Bad Request"
+                        response_body = "Bad Request"
+                else:
+                    status_code = "400 Bad Request"
+                    response_body = "Bad Request"
+            elif method == 'POST' and path == '/submit':
+                status_code = "201 Created"
+                response_body = f"created {path}"
+            elif method == 'GET' and path == '/hello':
+                status_code = "200 OK"
+                if params:
+                    param_str = '&'.join(f"{k}={v}" for k, v in params.items())
+                    response_body = f"okay {param_str}"
+                else:
+                    response_body = "okay"
             else:
-                response_body = path
-        elif method == 'POST':
-            # Replay with created + path name
-            response_body = f"created {path}"
-        else:
-            response_body = "Hello from server"
-
+                status_code = "400 Bad Request"
+                response_body = "Bad Request"
+        
         response_headers = {
             'Content-Type': 'text/plain',
             'Content-Length': str(len(response_body)),
@@ -130,7 +162,7 @@ if __name__ == "__main__":
         
         header_lines = '\r\n'.join(f"{key}: {value}" for key, value in response_headers.items())
         response = (
-            "HTTP/1.0 200 OK\r\n"
+            f"HTTP/1.0 {status_code}\r\n"
             f"{header_lines}\r\n"
             "\r\n"
             f"{response_body}"
