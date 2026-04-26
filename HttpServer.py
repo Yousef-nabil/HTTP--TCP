@@ -70,14 +70,6 @@ if __name__ == "__main__":
 
     while True:
         data = server.receive()
-        if not data:
-            # Client disconnected, do new handshake for next client
-            print("Client disconnected, waiting for new connection...")
-            if server.server_socket:
-                server.server_socket.close()
-            server = ReliableUDP("127.0.0.1", 8080, is_server=True)
-            server.handshake()
-            continue
         
         raw_request = data.decode()
         print("=" * 50)
@@ -169,3 +161,7 @@ if __name__ == "__main__":
         )
 
         server.send(response)
+        server.close()
+        print("Disconnected. Waiting for new connection...")
+        server = ReliableUDP("127.0.0.1", 8080, is_server=True)
+        server.handshake()
