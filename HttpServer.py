@@ -126,8 +126,8 @@ if __name__ == "__main__":
                         if 10 <= user_id <= 100:
                             response_body = f"id={user_id}"
                         else:
-                            status_code = "400 Bad Request"
-                            response_body = "Bad Request"
+                            status_code = "404 NOT FOUND"
+                            response_body = "NOT FOUND"
                     except (ValueError, TypeError):
                         status_code = "400 Bad Request"
                         response_body = "Bad Request"
